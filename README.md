@@ -1,3 +1,4 @@
+```
 WBDC/
 ├── model.py
 ├── main.py
@@ -7,7 +8,7 @@ WBDC/
 └── data/
     ├── with_hist_trunc.pkl
     ├── feed_embedding.npy
-
+```
 
 ```
 pandas==2.3.3
