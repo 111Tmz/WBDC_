@@ -1,51 +1,44 @@
 # -*- coding:utf-8 -*-
-"""
-主训练入口（main.py）
-负责：
-1. 数据加载
-2. DataLoader
-3. 模型初始化
-4. 训练 + 验证
-"""
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from collections import defaultdict
 
 import torch
 from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 
-# ===== 导入你刚刚写的模块 =====
-from model import Model, MMOEDataset, uAUC
 
+from model import Model, MMOEDataset
 
 # ==========================
-# 一、评估函数（多任务）
+# uAUC
 # ==========================
-def evaluate(val_labels, val_preds, userids, target):
-    from collections import defaultdict
+def uAUC(labels, preds, user_id_list):
     from sklearn.metrics import roc_auc_score
 
-    def uAUC(labels, preds, user_id_list):
-        user_pred = defaultdict(list)
-        user_truth = defaultdict(list)
+    user_pred = defaultdict(list)
+    user_truth = defaultdict(list)
 
-        for i in range(len(labels)):
-            uid = user_id_list[i]
-            user_pred[uid].append(preds[i])
-            user_truth[uid].append(labels[i])
+    for i in range(len(labels)):
+        uid = user_id_list[i]
+        user_pred[uid].append(preds[i])
+        user_truth[uid].append(labels[i])
 
-        total_auc, size = 0.0, 0.0
-        for uid in user_pred:
-            if len(set(user_truth[uid])) > 1:
-                total_auc += roc_auc_score(user_truth[uid], user_pred[uid])
-                size += 1
+    total_auc, size = 0.0, 0.0
+    for uid in user_pred:
+        if len(set(user_truth[uid])) > 1:
+            total_auc += roc_auc_score(user_truth[uid], user_pred[uid])
+            size += 1
 
-        return total_auc / size if size > 0 else 0
+    return total_auc / size if size > 0 else 0
 
-    eval_dict = {}
+
+def evaluate(val_labels, val_preds, userids, target):
     weights = {"read_comment":4, "like":3, "click_avatar":2, "forward":1}
 
+    eval_dict = {}
     for i, t in enumerate(target):
         eval_dict[t] = uAUC(val_labels[i], val_preds[i], userids)
 
@@ -56,45 +49,60 @@ def evaluate(val_labels, val_preds, userids, target):
 
 
 # ==========================
-# 二、Loss（多任务加权）
+# Loss
 # ==========================
+
+
 def multi_loss(preds, targets, weights):
-    loss_fn = torch.nn.BCELoss()
+    loss_fn = torch.nn.BCEWithLogitsLoss()
     total = 0
     for i in range(len(preds)):
         total += weights[i] * loss_fn(preds[i], targets[i])
     return total / sum(weights)
 
-
 # ==========================
-# 三、训练函数
+# Train（🔥优化版）
 # ==========================
 def train(model, train_loader, val_loader, userids, target, epochs=3):
     device = next(model.parameters()).device
 
-    optimizer = torch.optim.Adagrad(
+    # optimizer = torch.optim.Adagrad(model.parameters(), lr=0.01)
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=0.01,
-        weight_decay=1e-5
+        lr=1e-3,
+        weight_decay=1e-4
     )
 
-    weights = [4,3,2,1]  # 多任务权重
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer,
+        step_size=1,
+        gamma=0.9
+    )
+
+
+    scaler = GradScaler()  # ⭐ 混合精度
+
+    weights = [4,3,2,1]
 
     for epoch in range(epochs):
         print(f"\n===== Epoch {epoch+1} =====")
 
         # ===== train =====
         model.train()
-        for x, y in tqdm(train_loader):
-            x = {k:v.to(device) for k,v in x.items()}
-            y = [t.to(device).unsqueeze(1) for t in y]
+        for x, y in tqdm(train_loader, desc="Training"):
+            x = {k:v.to(device, non_blocking=True) for k,v in x.items()}
+            y = [t.to(device, non_blocking=True).unsqueeze(1) for t in y]
 
             optimizer.zero_grad()
-            out = model(x)
 
-            loss = multi_loss(out, y, weights)
-            loss.backward()
-            optimizer.step()
+            # ⭐ 混合精度
+            with autocast("cuda"):
+                out = model(x)
+                loss = multi_loss(out, y, weights)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
         print("Train done")
 
@@ -104,12 +112,14 @@ def train(model, train_loader, val_loader, userids, target, epochs=3):
         labels = [[] for _ in target]
 
         with torch.no_grad():
-            for x, y in val_loader:
-                x = {k:v.to(device) for k,v in x.items()}
+            # for x, y in val_loader:
+            for x, y in tqdm(val_loader, desc="Evaluating"):
+                x = {k:v.to(device, non_blocking=True) for k,v in x.items()}
                 out = model(x)
 
                 for i in range(len(target)):
-                    preds[i].append(out[i].cpu().numpy())
+                    # preds[i].append(out[i].cpu().numpy())
+                    preds[i].append(torch.sigmoid(out[i]).cpu().numpy())
                     labels[i].append(y[i].numpy())
 
         preds = [np.concatenate(p) for p in preds]
@@ -117,56 +127,69 @@ def train(model, train_loader, val_loader, userids, target, epochs=3):
 
         evaluate(labels, preds, userids, target)
 
+        # ⭐ 清显存
+        torch.cuda.empty_cache()
+        scheduler.step()
+
+        print("lr:", scheduler.get_last_lr()[0])
+
 
 # ==========================
-# 四、主函数
+# 主函数
 # ==========================
 if __name__ == "__main__":
+    # 打印时间：
+    print("Start time:", pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-    # ===== 设备 =====
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("Using device:", device)
 
-    # ===== 特征定义 =====
     target = ["read_comment","like","click_avatar","forward"]
     sparse = ['userid','feedid','authorid','bgm_song_id','bgm_singer_id']
     dense = ['videoplayseconds']
 
-    # ===== 读取数据（已经处理好的）=====
-    data = pd.read_pickle('./data/with_hist_trunc.pkl')
+    # ===== 新数据 =====
+    data = pd.read_pickle('./data/processed/base.pkl')
+    hist_seq = np.load('./data/processed/hist_seq.npy')
 
-    # ===== 简单预处理 =====
+    # ===== 预处理 =====
     for f in sparse:
         data[f] = data[f].fillna(0).astype(np.int64)
 
     data[dense] = np.log(data[dense].fillna(0) + 1)
 
     # ===== 切分 =====
-    train_df = data[data['date_'] < 14]
-    val_df   = data[data['date_'] == 14]
+    train_idx = data['date_'] < 14
+    val_idx   = data['date_'] == 14
+
+    train_df = data[train_idx]
+    val_df   = data[val_idx]
+
+    train_hist = hist_seq[train_idx.values]
+    val_hist   = hist_seq[val_idx.values]
 
     # ===== feature size =====
     feature_sizes = {f:int(data[f].max())+1 for f in sparse}
 
-    # ===== DataLoader =====
+    # ===== DataLoader（🔥优化）=====
     train_loader = DataLoader(
-        MMOEDataset(train_df, sparse, dense, target, seq_len=30),
+        MMOEDataset(train_df, train_hist, None, sparse, dense, target),
         batch_size=512,
         shuffle=True,
-        num_workers=4
+        num_workers=4,
+        pin_memory=True
     )
 
     val_loader = DataLoader(
-        MMOEDataset(val_df, sparse, dense, target, seq_len=30),
+        MMOEDataset(val_df, val_hist, None, sparse, dense, target),
         batch_size=512,
-        num_workers=4
+        num_workers=4,
+        pin_memory=True
     )
 
     # ===== 模型 =====
     model = Model(sparse, dense, feature_sizes).to(device)
 
-    # ===== 用户id（评估用）=====
     userids = val_df['userid'].astype(str).tolist()
 
-    # ===== 训练 =====
     train(model, train_loader, val_loader, userids, target, epochs=3)
