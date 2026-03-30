@@ -48,6 +48,9 @@ tqdm==4.67.3
 torch==2.8.0
 ```
 
+<img width="2950" height="326" alt="image" src="https://github.com/user-attachments/assets/2b13de93-8080-4762-b080-1f81a3b5c7cc" />
+
+
 
 
 | 得分       | 查看评论               | 点赞                 | 点击头像               | 转发                 |
