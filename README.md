@@ -31,6 +31,14 @@ WBDC/
 │                                  # 可直接加载到 nn.Embedding
 ```
 
+py3.9
+
+uv venv
+
+激活
+
+uv pip install -r requirents.txt  -i https://pypi.tuna.tsinghua.edu.cn/simple
+
 ```
 pandas==2.3.3
 numpy==2.0.2
