@@ -1,5 +1,6 @@
 ```
 WBDC/
+├── requirents.txt            # 依赖包
 ├── prepare.py                # 🔧 数据预处理脚本（核心：特征工程 + 序列构造 + embedding对齐）
 ├── model.py                  # 🧠 模型定义（DeepFM + MMOE + DIN）
 ├── main.py                   # 🚀 训练入口（读取数据 + 训练 + 验证）
