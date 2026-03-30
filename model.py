@@ -39,17 +39,15 @@ def uAUC(labels, preds, user_id_list):
 # ==========================
 # 二、Dataset（支持DIN）
 # ==========================
+
 class MMOEDataset(Dataset):
-    """
-    注意：
-    hist_feedid: list[int]，长度固定（padding后）
-    """
-    def __init__(self, df, sparse, dense, target=None, seq_len=20):
+    def __init__(self, df, hist_seq, seq_len, sparse, dense, target=None):
         self.df = df.reset_index(drop=True)
+        self.hist_seq = hist_seq
+        self.seq_len = seq_len
         self.sparse = sparse
         self.dense = dense
         self.target = target
-        self.seq_len = seq_len
 
     def __len__(self):
         return len(self.df)
@@ -61,18 +59,14 @@ class MMOEDataset(Dataset):
         x = {f: torch.tensor(row[f], dtype=torch.long) for f in self.sparse}
         x.update({f: torch.tensor(row[f], dtype=torch.float32) for f in self.dense})
 
-        # ===== 用户历史序列（DIN用）=====
-        hist = row["hist_feedid"]  # list
-        # padding（统一长度）
-        if len(hist) < self.seq_len:
-            hist = hist + [0]*(self.seq_len - len(hist))
-
-        x["hist_feedid"] = torch.tensor(hist, dtype=torch.long)
+        # ===== 直接用 numpy =====
+        x["hist_feedid"] = torch.tensor(self.hist_seq[idx], dtype=torch.long)
 
         if self.target is None:
             return x
 
         y = [torch.tensor(row[t], dtype=torch.float32) for t in self.target]
+
         return x, y
 
 
@@ -91,30 +85,51 @@ class FM(nn.Module):
 # ==========================
 # 四、DIN Attention
 # ==========================
+
+class Dice(nn.Module):
+    def __init__(self, dim, eps=1e-8):
+        super().__init__()
+        self.bn = nn.BatchNorm1d(dim, eps=eps)
+        self.alpha = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x):
+        if x.dim() == 3:
+            # (batch, seq_len, dim)
+            x = x.transpose(1, 2)
+            x = self.bn(x)
+            x = x.transpose(1, 2)
+        else:
+            x = self.bn(x)
+
+        p = torch.sigmoid(x)
+        return p * x + (1 - p) * self.alpha * x
+
+
 class Attention(nn.Module):
-    """DIN注意力"""
     def __init__(self, dim):
         super().__init__()
         self.fc = nn.Sequential(
             nn.Linear(dim*4, 128),
-            nn.ReLU(),
+            Dice(128),   # ⭐ 改这里
             nn.Linear(128, 1)
         )
 
-    def forward(self, query, keys):
-        # query: (batch, dim)
-        # keys: (batch, seq_len, dim)
-
+    def forward(self, query, keys, mask):
         seq_len = keys.size(1)
         query = query.unsqueeze(1).expand(-1, seq_len, -1)
 
         x = torch.cat([query, keys, query-keys, query*keys], dim=-1)
-
         attn = self.fc(x).squeeze(-1)
-        attn = F.softmax(attn, dim=1)
+
+        # mask
+        attn = attn.masked_fill(mask == 0, torch.finfo(attn.dtype).min)
+
+        # ❗ 仍然必须用 softmax
+        attn = torch.softmax(attn, dim=1)
 
         out = torch.sum(keys * attn.unsqueeze(-1), dim=1)
         return out
+
 
 
 class DIN(nn.Module):
@@ -122,9 +137,8 @@ class DIN(nn.Module):
         super().__init__()
         self.attn = Attention(dim)
 
-    def forward(self, hist_emb, target_emb):
-        return self.attn(target_emb, hist_emb)
-
+    def forward(self, hist_emb, target_emb, mask):
+        return self.attn(target_emb, hist_emb, mask)
 
 # ==========================
 # 五、MMOE（含Expert Dropout）
@@ -171,37 +185,54 @@ class MMOELayer(nn.Module):
 # ==========================
 # 六、主模型
 # ==========================
+
 class Model(nn.Module):
     def __init__(self, sparse, dense, feature_sizes):
         super().__init__()
 
         embed_dim = 16
+        feed_dim = 64   # 🔥 新维度
         self.sparse = sparse
         self.dense = dense
 
-        # ===== Embedding =====
+        # ===== sparse embedding =====
         self.emb = nn.ModuleDict({
             f: nn.Embedding(feature_sizes[f], embed_dim)
             for f in sparse
         })
 
-        # ===== feed embedding（512维）=====
-        # 加载预训练embedding
-        emb_matrix = np.load('./data/feed_embedding.npy')
+        # ===== LR =====
+        self.linear = nn.ModuleDict({
+            f: nn.Embedding(feature_sizes[f], 1)
+            for f in sparse
+        })
 
-        self.feed_emb = nn.Embedding.from_pretrained(
+        # ===== 原始 feed embedding（512）=====
+        emb_matrix = np.load('./data/processed/feed_embedding.npy')
+        self.feed_emb_raw = nn.Embedding.from_pretrained(
             torch.tensor(emb_matrix, dtype=torch.float32),
-            freeze=False   # 🔥 可以训练（推荐）
+            freeze=False
         )
 
-        # ===== DIN =====
-        self.din = DIN(512)
+        # 🔥 ===== 降维层（512 → 64）=====
+
+        emb_dim = emb_matrix.shape[1]
+
+        self.feed_proj = nn.Sequential(
+            nn.Linear(emb_dim,128),
+            nn.ReLU(),
+            nn.Linear(128,64)
+        )
+
+
+        # ===== DIN（改成64维）=====
+        self.din = DIN(feed_dim)
 
         # ===== FM =====
         self.fm = FM()
 
         # ===== DNN =====
-        input_dim = embed_dim*len(sparse) + len(dense) + 512 + 512
+        input_dim = embed_dim * len(sparse) + len(dense) + feed_dim + feed_dim
 
         self.dnn = nn.Sequential(
             nn.Linear(input_dim, 256),
@@ -214,29 +245,52 @@ class Model(nn.Module):
         # ===== MMOE =====
         self.mmoe = MMOELayer(
             num_tasks=4,
-            num_experts=8,   # 🔥 改这里
+            num_experts=8,
             input_dim=128,
             output_dim=8,
-            dropout=0.3   # 🔥 改这里
+            dropout=0.3
         )
 
-        # ===== task =====
-        self.out = nn.ModuleList([nn.Linear(8,1) for _ in range(4)])
+        # ===== 融合层 =====
+        self.final = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(1 + 1 + 8, 16),
+                nn.ReLU(),
+                nn.Linear(16, 1)
+            )
+            for _ in range(4)
+        ])
 
     def forward(self, x):
-        # ===== sparse =====
+        # ===== sparse embedding =====
         embed = torch.stack([self.emb[f](x[f]) for f in self.sparse], dim=1)
         sparse_flat = embed.view(embed.size(0), -1)
+
+        # ===== LR =====
+        linear_part = torch.sum(
+            torch.cat([self.linear[f](x[f]) for f in self.sparse], dim=1),
+            dim=1,
+            keepdim=True
+        )  # (batch,1)
+
+        # ===== FM =====
+        fm_part = self.fm(embed).sum(dim=1, keepdim=True)  # (batch,1)
 
         # ===== dense =====
         dense = torch.cat([x[f].unsqueeze(1) for f in self.dense], dim=1)
 
-        # ===== feed embedding =====
-        feed = self.feed_emb(x["feedid"])  # (batch,512)
+        # ===== feed embedding（降维）=====
+        feed_raw = self.feed_emb_raw(x["feedid"])      # (batch,512)
+        feed = self.feed_proj(feed_raw)                # (batch,64)
+
+        # ===== hist embedding（降维）=====
+        hist_raw = self.feed_emb_raw(x["hist_feedid"])  # (batch,seq,512)
+        hist = self.feed_proj(hist_raw)                 # (batch,seq,64)
+        
 
         # ===== DIN =====
-        hist = self.feed_emb(x["hist_feedid"])  # (batch,seq,512)
-        user_interest = self.din(hist, feed)
+        mask = (x["hist_feedid"] != 0).float()  # (batch, seq_len)
+        user_interest = self.din(hist, feed, mask)            # (batch,64)
 
         # ===== DNN =====
         dnn_input = torch.cat([sparse_flat, dense, feed, user_interest], dim=1)
@@ -247,6 +301,16 @@ class Model(nn.Module):
 
         outputs = []
         for i in range(4):
-            outputs.append(torch.sigmoid(self.out[i](mmoe_out[i])))
+            deep_part = mmoe_out[i]  # (batch,8)
+
+            concat_feat = torch.cat([
+                linear_part,
+                fm_part,
+                deep_part
+            ], dim=1)
+
+            logit = self.final[i](concat_feat)
+            # outputs.append(torch.sigmoid(logit))
+            outputs.append(logit)  # ⭐ 不要 sigmoid
 
         return outputs
