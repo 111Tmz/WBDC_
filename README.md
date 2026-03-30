@@ -10,7 +10,7 @@ WBDC/
 │   │   ├── user_action.csv       # 用户行为日志（点击、点赞、转发等）
 │   │   ├── feed_info.csv         # feed侧特征（作者、音乐、视频时长等）
 │   │   ├── feed_embeddings.csv   # 预训练feed embedding（内容向量）
-│
+│   │
 │   └── processed/            # ⚙️ 预处理后数据（prepare.py 生成）
 │       ├── base.pkl              # 🧾 主训练数据（所有特征已处理）
 │       │                          # 包含：
