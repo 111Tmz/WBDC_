@@ -47,8 +47,8 @@ scikit-learn==1.6.1
 tqdm==4.67.3
 torch==2.8.0
 ```
+<img width="1198" height="1272" alt="image" src="https://github.com/user-attachments/assets/ef5352ee-a653-4a0f-b616-bd65bdb9d82c" />
 
-<img width="2950" height="326" alt="image" src="https://github.com/user-attachments/assets/2b13de93-8080-4762-b080-1f81a3b5c7cc" />
 
 
 
