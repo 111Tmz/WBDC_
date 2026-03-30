@@ -1,167 +1,96 @@
 digraph G {
-    rankdir=BT; // 从底部到顶部布局
-    node [shape=box, style=filled, fillcolor=lightblue, fontname="Helvetica"];
-    edge [fontname="Helvetica", fontsize=10];
+    rankdir=BT;
+    node [shape=box, style=filled, fontname="Helvetica"];
+    edge [fontname="Helvetica"];
 
-    // Inputs Cluster (在底部)
-    subgraph cluster_inputs {
-        label = "Raw Inputs";
-        color = "#007bff";
-        style = "filled";
-        fillcolor = "#e6f2ff";
+    // ===== 输入层 =====
+    subgraph cluster_input {
+        label="Input Layer";
+        color="#007bff";
+        style=filled;
+        fillcolor="#e6f2ff";
 
-        dense_feats [label="Dense Features\n(videoplayseconds)", shape=oval, fillcolor="lightgray"];
-        sparse_feats [label="Sparse Features\n(userid, feedid, authorid,\nbgm_song_id, bgm_singer_id)", shape=oval, fillcolor="lightgray"];
-        target_feedid [label="Target feedid", shape=oval, fillcolor="lightgray"];
-        hist_feedids [label="History feedids", shape=oval, fillcolor="lightgray"];
+        sparse [label="Sparse Features\n(user, feed, author...)", fillcolor="lightgray"];
+        dense [label="Dense Feature\n(videoplayseconds)", fillcolor="lightgray"];
+        target [label="Target Feed", fillcolor="lightgray"];
+        hist [label="History Feed Seq", fillcolor="lightgray"];
     }
 
-    // Embeddings & LR Path
-    subgraph cluster_embeddings {
-        label = "Embeddings & LR";
-        color = "#28a745";
-        style = "filled";
-        fillcolor = "#e6ffe6";
+    // ===== Embedding =====
+    subgraph cluster_emb {
+        label="Embedding Layer";
+        color="#28a745";
+        style=filled;
+        fillcolor="#e6ffe6";
 
-        // Sparse Embeddings & LR
-        sparse_feats -> sparse_embedding_layer;
-        sparse_embedding_layer [label="Sparse Embedding\n(self.emb)", fillcolor="lightgoldenrod"];
-        sparse_embedding_layer -> embed_out [label="(Batch, 5, 16)"];
-        
-        sparse_feats -> sparse_linear_layer;
-        sparse_linear_layer [label="Sparse Linear\n(self.linear)", fillcolor="lightcoral"];
-        sparse_linear_layer -> linear_part [label="(Batch, 1)"];
-        
-        // Feed Embeddings
-        target_feedid -> feed_emb_raw;
-        feed_emb_raw [label="Feed Embedding Raw\n(self.feed_emb_raw)\n(Num_Items, 512)", fillcolor="lightgreen"];
-        feed_emb_raw -> feed_raw_out [label="(Batch, 512)"];
-        
-        hist_feedids -> hist_emb_raw;
-        hist_emb_raw [label="Hist Embedding Raw\n(self.feed_emb_raw)\n(Num_Items, 512)", fillcolor="lightgreen"];
-        hist_emb_raw -> hist_raw_out [label="(Batch, Seq_Len, 512)"];
-        
-        feed_raw_out -> feed_proj;
-        feed_proj [label="Feed Projection\n(Linear -> ReLU -> Linear)\n(512 -> 128 -> 64)", fillcolor="lightpink"];
-        feed_proj -> feed_projected [label="feed\n(Batch, 64)"];
-
-        hist_raw_out -> hist_proj;
-        hist_proj [label="Hist Projection\n(Linear -> ReLU -> Linear)\n(512 -> 128 -> 64)", fillcolor="lightpink"];
-        hist_proj -> hist_projected [label="hist\n(Batch, Seq_Len, 64)"];
-
-        // 强制一些节点在同一层，减少交叉
-        { rank=same; sparse_embedding_layer; sparse_linear_layer; feed_emb_raw; hist_emb_raw; }
-        { rank=same; embed_out; linear_part; feed_raw_out; hist_raw_out; }
-        { rank=same; feed_proj; hist_proj; }
-        { rank=same; feed_projected; hist_projected; }
+        emb [label="Sparse Embedding\n(5 × 16)", fillcolor="lightgoldenrod"];
+        feed_emb [label="Feed Embedding\n(512 → 64)", fillcolor="lightpink"];
+        hist_emb [label="Hist Embedding\n(Seq × 512 → 64)", fillcolor="lightpink"];
     }
 
-    // Feature Interaction Cluster
+    sparse -> emb;
+    target -> feed_emb;
+    hist -> hist_emb;
+
+    // ===== Feature Interaction =====
     subgraph cluster_interaction {
-        label = "Feature Interaction Layers";
-        color = "#ffc107";
-        style = "filled";
-        fillcolor = "#fff3cd";
+        label="Feature Interaction";
+        color="#ffc107";
+        style=filled;
+        fillcolor="#fff3cd";
 
-        // FM Layer
-        embed_out -> fm_layer;
-        fm_layer [label="FM Layer\n(self.fm)", fillcolor="palegoldenrod"];
-        fm_layer -> fm_part [label="(Batch, 1)"];
-
-        // DIN Layer (DIN Mask现在在此层生成)
-        din_mask_node [label="DIN Mask\n(hist_feedid != 0)", shape=oval, fillcolor="lightgray"]; // DIN Mask移到这里
-        feed_projected -> din_layer [label="DIN Query\n(Batch, 64)"];
-        hist_projected -> din_layer [label="DIN Keys\n(Batch, Seq_Len, 64)"];
-        din_mask_node -> din_layer [label="DIN Mask"];
-
-        din_layer [label="DIN (self.din)\n(Attention + Dice)", fillcolor="peachpuff"];
-        din_layer -> user_interest [label="(Batch, 64)"];
-
-        // 强制某些节点在同一层
-        { rank=same; fm_layer; din_mask_node; din_layer; }
-        { rank=same; fm_part; user_interest; }
+        fm [label="FM Layer", fillcolor="palegoldenrod"];
+        din [label="DIN Attention\n(User Interest)", fillcolor="peachpuff"];
     }
 
-    // Deep Network Path
-    subgraph cluster_deep_path {
-        label = "Deep Network Path";
-        color = "#dc3545";
-        style = "filled";
-        fillcolor = "#f8d7da";
+    emb -> fm;
+    feed_emb -> din;
+    hist_emb -> din;
 
-        embed_out_flat [label="Sparse Embed Flat\n(Batch, 5*16)", fillcolor="beige"];
-        embed_out -> embed_out_flat [label="Flatten"];
+    // ===== Deep部分 =====
+    subgraph cluster_deep {
+        label="Deep Network";
+        color="#dc3545";
+        style=filled;
+        fillcolor="#f8d7da";
 
-        dnn_input_concat [label="DNN Input Concatenation"];
-        embed_out_flat -> dnn_input_concat;
-        dense_feats -> dnn_input_concat [label="Dense\n(Batch, 1)"];
-        feed_projected -> dnn_input_concat [label="Feed\n(Batch, 64)"];
-        user_interest -> dnn_input_concat [label="User Interest\n(Batch, 64)"];
-        
-        dnn_input_concat -> dnn_layer [label="(Batch, 209)"];
-
-        dnn_layer [label="DNN (self.dnn)\n(209 -> 256 -> 128)", fillcolor="salmon"];
-        dnn_layer -> dnn_output [label="(Batch, 128)"];
-
-        mmoe_layer [label="MMOE Layer (self.mmoe)\n(4 Tasks, 8 Experts, Expert Dropout)", fillcolor="darkorange"];
-        dnn_output -> mmoe_layer [label="(Batch, 128)"];
-        
-        mmoe_layer -> mmoe_task_0_out [label="Task 0 Out\n(Batch, 8)"];
-        mmoe_layer -> mmoe_task_1_out [label="Task 1 Out\n(Batch, 8)"];
-        mmoe_layer -> mmoe_task_2_out [label="Task 2 Out\n(Batch, 8)"];
-        mmoe_layer -> mmoe_task_3_out [label="Task 3 Out\n(Batch, 8)"];
-
-        { rank=same; mmoe_task_0_out; mmoe_task_1_out; mmoe_task_2_out; mmoe_task_3_out; }
+        dnn_input [label="Concat\n(embed + dense + feed + DIN)", fillcolor="beige"];
+        dnn [label="DNN\n(209 → 256 → 128)", fillcolor="salmon"];
+        mmoe [label="MMOE\n(4 Tasks, 8 Experts)", fillcolor="darkorange"];
     }
 
-    // Final Output Layers (在顶部)
+    emb -> dnn_input;
+    dense -> dnn_input;
+    feed_emb -> dnn_input;
+    din -> dnn_input;
+
+    dnn_input -> dnn;
+    dnn -> mmoe;
+
+    // ===== Wide部分 =====
+    subgraph cluster_wide {
+        label="Wide (LR + FM)";
+        color="#6c757d";
+        style=filled;
+        fillcolor="#f1f3f5";
+
+        linear [label="Linear (LR)", fillcolor="lightcoral"];
+    }
+
+    sparse -> linear;
+
+    // ===== 输出层 =====
     subgraph cluster_output {
-        label = "Final Output Layers";
-        color = "#6f42c1";
-        style = "filled";
-        fillcolor = "#e9ecef";
+        label="Multi-task Output";
+        color="#6f42c1";
+        style=filled;
+        fillcolor="#e9ecef";
 
-        // Task 0
-        mmoe_task_0_out [label="MMOE Task 0", shape=box, fillcolor="lightgray"];
-        final_concat_0 [label="Final Concat 0", shape=point];
-        linear_part -> final_concat_0 [label="LR"];
-        fm_part -> final_concat_0 [label="FM"];
-        mmoe_task_0_out -> final_concat_0 [label="MMOE_0"];
-        final_concat_0 -> final_mlp_0 [label="(Batch, 10)"];
-        final_mlp_0 [label="Task 0 Final MLP\n(self.final[0])\n(10 -> 16 -> 1)", fillcolor="mediumpurple"];
-        final_mlp_0 -> output_0 [label="Logit_0\n(Batch, 1)", fillcolor="white"];
-
-        // Task 1
-        mmoe_task_1_out [label="MMOE Task 1", shape=box, fillcolor="lightgray"];
-        final_concat_1 [label="Final Concat 1", shape=point];
-        linear_part -> final_concat_1 [label="LR"];
-        fm_part -> final_concat_1 [label="FM"];
-        mmoe_task_1_out -> final_concat_1 [label="MMOE_1"];
-        final_concat_1 -> final_mlp_1 [label="(Batch, 10)"];
-        final_mlp_1 [label="Task 1 Final MLP\n(self.final[1])\n(10 -> 16 -> 1)", fillcolor="mediumpurple"];
-        final_mlp_1 -> output_1 [label="Logit_1\n(Batch, 1)", fillcolor="white"];
-
-        // Task 2
-        mmoe_task_2_out [label="MMOE Task 2", shape=box, fillcolor="lightgray"];
-        final_concat_2 [label="Final Concat 2", shape=point];
-        linear_part -> final_concat_2 [label="LR"];
-        fm_part -> final_concat_2 [label="FM"];
-        mmoe_task_2_out -> final_concat_2 [label="MMOE_2"];
-        final_concat_2 -> final_mlp_2 [label="(Batch, 10)"];
-        final_mlp_2 [label="Task 2 Final MLP\n(self.final[2])\n(10 -> 16 -> 1)", fillcolor="mediumpurple"];
-        final_mlp_2 -> output_2 [label="Logit_2\n(Batch, 1)", fillcolor="white"];
-
-        // Task 3
-        mmoe_task_3_out [label="MMOE Task 3", shape=box, fillcolor="lightgray"];
-        final_concat_3 [label="Final Concat 3", shape=point];
-        linear_part -> final_concat_3 [label="LR"];
-        fm_part -> final_concat_3 [label="FM"];
-        mmoe_task_3_out -> final_concat_3 [label="MMOE_3"];
-        final_concat_3 -> final_mlp_3 [label="(Batch, 10)"];
-        final_mlp_3 [label="Task 3 Final MLP\n(self.final[3])\n(10 -> 16 -> 1)", fillcolor="mediumpurple"];
-        final_mlp_3 -> output_3 [label="Logit_3\n(Batch, 1)", fillcolor="white"];
-        
-        // 强制所有输出节点在同一层，并在视觉上堆叠，减少横向空间
-        { rank=same; output_0; output_1; output_2; output_3; }
+        final [label="Task Heads × 4\n(Concat[LR + FM + MMOE])\nMLP → Logit", fillcolor="mediumpurple"];
     }
+
+    // 连接
+    fm -> final;
+    linear -> final;
+    mmoe -> final;
 }
