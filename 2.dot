@@ -1,0 +1,78 @@
+digraph G {
+    rankdir=BT;
+    node [shape=box, style=rounded, fontname="Helvetica"];
+
+    // ===== Shared Preprocessing =====
+    subgraph cluster_shared {
+        label="Shared Preprocessing";
+        color="#4A90E2";
+
+        Start [label="Start"];
+
+        LoadData [label="Load CSV\n(user_action + feed_info)"];
+        Merge [label="Merge on feedid"];
+        Sort1 [label="Sort by (userid, date_)"];
+
+        NegSampling [label="User-level Multi-task\nNegative Sampling"];
+        Sort2 [label="Re-sort (for DIN)"];
+
+        FillNA [label="Fill NA"];
+        IDMapping [label="ID Mapping\n(mapping_dicts + feature_sizes)"];
+
+        Start -> LoadData -> Merge -> Sort1 -> NegSampling -> Sort2 -> FillNA -> IDMapping;
+    }
+
+    // ===== Branch 1: Base Data =====
+    subgraph cluster_base {
+        label="Output: base.pkl";
+        color="#7ED321";
+
+        SaveBase [label="Save base.pkl"];
+    }
+
+    // ===== Branch 2: DIN Sequence =====
+    subgraph cluster_seq {
+        label="Output: hist_seq.npy + seq_len.npy";
+        color="#F5A623";
+
+        BuildSeq [label="Build DIN Sequence\n(hist_seq, seq_len)"];
+        SaveSeq [label="Save hist_seq.npy\nSave seq_len.npy"];
+    }
+
+    // ===== Branch 3: Embedding =====
+    subgraph cluster_emb {
+        label="Output: feed_embedding.npy";
+        color="#D0021B";
+
+        LoadEmb [label="Load feed_embeddings.csv"];
+        BuildAuthor [label="Build Author Embedding"];
+        GlobalMean [label="Compute Global Mean"];
+
+        BuildMatrix [label="Init Embedding Matrix"];
+
+        Check [label="feedid in emb_dict?"];
+
+        UseFeed [label="Use Feed Emb"];
+        UseAuthor [label="Use Author Emb"];
+        UseGlobal [label="Use Global Mean"];
+
+        SaveEmb [label="Save feed_embedding.npy"];
+
+        LoadEmb -> BuildAuthor -> GlobalMean -> BuildMatrix -> Check;
+
+        Check -> UseFeed [label="Yes"];
+        Check -> UseAuthor [label="No & author"];
+        Check -> UseGlobal [label="No & none"];
+
+        UseFeed -> SaveEmb;
+        UseAuthor -> SaveEmb;
+        UseGlobal -> SaveEmb;
+    }
+
+    // ===== Connections =====
+    IDMapping -> SaveBase;
+
+    IDMapping -> BuildSeq -> SaveSeq;
+
+    IDMapping -> LoadEmb;
+}
