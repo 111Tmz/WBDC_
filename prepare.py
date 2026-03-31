@@ -21,6 +21,61 @@ from tqdm import tqdm
 import os
 
 # =======================
+# 🔥 多任务负采样函数（新增）
+# =======================
+# =======================
+# 🔥 用户级 + 多任务负采样（最终版）
+# =======================
+def negative_sampling_user_weighted(df, weights, neg_ratio=3):
+    print("🚀 User-level + multi-task sampling...")
+
+    dfs = []
+
+    for uid, group in df.groupby('userid'):
+        group = group.copy()
+
+        # ===== 1️⃣ 多任务打分 =====
+        score = np.zeros(len(group))
+
+        for label, w in weights.items():
+            if label in group.columns:
+                group[label] = group[label].fillna(0)
+                score += w * group[label].values
+
+        group["score"] = score
+
+        # ===== 2️⃣ 正负划分 =====
+        pos = group[group["score"] > 0]
+        neg = group[group["score"] == 0]
+
+        if len(pos) == 0:
+            continue
+
+        # ===== 3️⃣ 负样本采样 =====
+        neg_keep = min(len(neg), len(pos) * neg_ratio)
+
+        if len(neg) > 0:
+            # ⭐ 简单均匀采样（稳定版）
+            neg_sample = neg.sample(
+                n=neg_keep,
+                random_state=42
+            )
+            sampled = pd.concat([pos, neg_sample])
+        else:
+            sampled = pos
+
+        dfs.append(sampled)
+
+    df_sampled = pd.concat(dfs)
+
+    # 打乱
+    df_sampled = df_sampled.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    print(f"After sampling: {len(df)} -> {len(df_sampled)}")
+
+    return df_sampled
+
+# =======================
 # 参数
 # =======================
 ACTION_PATH = './data/wechat_algo_data1/user_action.csv'
@@ -28,7 +83,7 @@ FEED_INFO_PATH = './data/wechat_algo_data1/feed_info.csv'
 EMB_PATH = './data/wechat_algo_data1/feed_embeddings.csv'
 
 SAVE_DIR = './data/processed'
-MAX_LEN = 55 # 85%的用户历史长度 >= 55
+MAX_LEN = 150 # 25%的用户历史长度 >= 94
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -45,6 +100,28 @@ data = action.merge(feed, on='feedid', how='left')
 
 # 排序（DIN 必须）
 data = data.sort_values(['userid', 'date_']).reset_index(drop=True)
+
+# =======================
+# 🔥 负采样（用户级 + 多任务）
+# =======================
+print("⚖️ Negative sampling...")
+
+WEIGHTS = {
+    "read_comment": 4,
+    "like": 3,
+    "click_avatar": 2,
+    "forward": 1
+}
+
+data = negative_sampling_user_weighted(
+    data,
+    weights=WEIGHTS,
+    neg_ratio=10
+)
+
+# ⚠️ 重新排序（保证DIN序列正确）
+data = data.sort_values(['userid', 'date_']).reset_index(drop=True)
+
 
 # =======================
 # 2️⃣ 特征定义
