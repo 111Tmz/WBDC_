@@ -1,15 +1,14 @@
 # -*- coding:utf-8 -*-
 """
-完整版 prepare.py（工业级）
+🔥 进阶工业版 prepare.py（带冷启动优化）
 
-包含：
-1. 行为数据 + feed特征 join
-2. ID 映射（全部 sparse 特征）
-3. 历史序列（DIN）
-4. 预训练 embedding 对齐
+升级点：
+1. embedding 对齐修复（避免错位）
+2. 冷启动优化（author + global mean）
+3. 更安全的 mapping 体系
 
 输出：
-- base.pkl（包含所有特征）
+- base.pkl
 - hist_seq.npy
 - seq_len.npy
 - feed_embedding.npy
@@ -29,7 +28,7 @@ FEED_INFO_PATH = './data/wechat_algo_data1/feed_info.csv'
 EMB_PATH = './data/wechat_algo_data1/feed_embeddings.csv'
 
 SAVE_DIR = './data/processed'
-MAX_LEN = 50
+MAX_LEN = 55 # 85%的用户历史长度 >= 55
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 
@@ -41,11 +40,11 @@ print("📥 Load data...")
 action = pd.read_csv(ACTION_PATH)
 feed = pd.read_csv(FEED_INFO_PATH)
 
-# ===== merge =====
+# merge
 data = action.merge(feed, on='feedid', how='left')
 
-# 排序（关键）
-data = data.sort_values(['userid', 'date_'])
+# 排序（DIN 必须）
+data = data.sort_values(['userid', 'date_']).reset_index(drop=True)
 
 # =======================
 # 2️⃣ 特征定义
@@ -64,22 +63,27 @@ for f in sparse:
 data[dense] = data[dense].fillna(0)
 
 # =======================
-# 4️⃣ ID 映射（全部 sparse）
+# 4️⃣ ID 映射（保存 mapping！）
 # =======================
 print("🔢 ID mapping...")
 
 feature_sizes = {}
+mapping_dicts = {}  # 🔥 保存所有 mapping
 
 for f in sparse:
     unique_vals = data[f].unique()
+    
     mapping = {v: i+1 for i, v in enumerate(unique_vals)}  # 0留padding
+    
     data[f] = data[f].map(mapping)
+    
     feature_sizes[f] = len(mapping) + 1
+    mapping_dicts[f] = mapping  # 🔥 保存
 
 print("feature_sizes:", feature_sizes)
 
 # =======================
-# 5️⃣ 构造历史序列（只用 feedid）
+# 5️⃣ 构造历史序列（DIN）
 # =======================
 print("📜 Build history sequence...")
 
@@ -103,7 +107,7 @@ for i, (uid, fid) in enumerate(tqdm(zip(data['userid'], data['feedid']), total=N
     hist.append(fid)
 
 # =======================
-# 6️⃣ 处理 embedding
+# 6️⃣ 读取 embedding
 # =======================
 print("🧠 Load pretrained embedding...")
 
@@ -112,7 +116,7 @@ emb_df = pd.read_csv(EMB_PATH)
 feed_emb_dict = {}
 
 for row in tqdm(emb_df.itertuples(), total=len(emb_df)):
-    fid = row.feedid
+    raw_fid = row.feedid
     emb_str = row[2]
 
     vec = np.fromstring(emb_str, sep=' ', dtype=np.float32)
@@ -120,19 +124,38 @@ for row in tqdm(emb_df.itertuples(), total=len(emb_df)):
     if len(vec) == 0:
         continue
 
-    feed_emb_dict[fid] = vec
+    feed_emb_dict[raw_fid] = vec
 
-# 自动识别维度
 EMB_DIM = len(next(iter(feed_emb_dict.values())))
 print("Embedding dim:", EMB_DIM)
 
 # =======================
-# 7️⃣ 构建 embedding matrix
+# 🔥 7️⃣ 冷启动增强（author embedding）
 # =======================
-print("🔗 Build embedding matrix...")
+print("🧩 Build author embedding...")
+
+author_emb_dict = defaultdict(list)
+
+for _, row in feed.iterrows():
+    raw_fid = row['feedid']
+    author = row['authorid']
+    
+    if raw_fid in feed_emb_dict:
+        author_emb_dict[author].append(feed_emb_dict[raw_fid])
+
+# 求均值
+for k in author_emb_dict:
+    author_emb_dict[k] = np.mean(author_emb_dict[k], axis=0)
+
+# 全局均值
+global_mean_emb = np.mean(list(feed_emb_dict.values()), axis=0)
+
+# =======================
+# 8️⃣ 构建 embedding matrix（🔥核心优化）
+# =======================
+print("🔗 Build embedding matrix (with cold-start)...")
 
 num_items = feature_sizes['feedid']
-
 embedding_matrix = np.random.normal(
     scale=0.01,
     size=(num_items, EMB_DIM)
@@ -141,20 +164,38 @@ embedding_matrix = np.random.normal(
 embedding_matrix[0] = 0
 
 miss = 0
+used_author = 0
+used_global = 0
 
-# ⚠️ 注意：mapping后的 feedid
-reverse_map = {v:k for k,v in zip(data['feedid'], data['feedid'])}
+feedid_mapping = mapping_dicts['feedid']
 
-for raw_fid, idx in zip(action['feedid'], data['feedid']):
+for raw_fid, mapped_idx in tqdm(feedid_mapping.items(), desc="Building embedding"):
+
     if raw_fid in feed_emb_dict:
-        embedding_matrix[idx] = feed_emb_dict[raw_fid]
+        embedding_matrix[mapped_idx] = feed_emb_dict[raw_fid]
+
     else:
+        # 🔥 冷启动策略
+        author = feed.loc[feed['feedid'] == raw_fid, 'authorid']
+        
+        if len(author) > 0:
+            author = author.values[0]
+        else:
+            author = None
+
+        if author in author_emb_dict:
+            embedding_matrix[mapped_idx] = author_emb_dict[author]
+            used_author += 1
+        else:
+            embedding_matrix[mapped_idx] = global_mean_emb
+            used_global += 1
+
         miss += 1
 
-print("missing embedding:", miss)
+print(f"Missing: {miss}, Use author: {used_author}, Use global: {used_global}")
 
 # =======================
-# 8️⃣ 保存
+# 9️⃣ 保存
 # =======================
 print("💾 Save...")
 
