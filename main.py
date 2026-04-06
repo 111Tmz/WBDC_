@@ -102,6 +102,8 @@ def train(model, train_loader, val_loader, userids, target, epochs=3):
             with autocast("cuda"):
                 out = model(x)
                 loss = multi_loss(out, y, weights)
+                # 修改：直接相加 ==================================
+                # loss = multi_loss(out, y, weights=[1,1,1,1])
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
