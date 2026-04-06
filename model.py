@@ -204,7 +204,7 @@ class MMOELayer(nn.Module):
         for gate in self.gates:
             gate_out = torch.softmax(gate(x), dim=1)
             # gate_out的形状是(batch_size, num_experts)，表示每个专家的权重
-            gate_out *= mask
+            gate_out = gate_out * mask
             gate_out = gate_out / (gate_out.sum(dim=1, keepdim=True)+1e-8)
             # 对gate_out进行归一化，确保权重和为1，避免drop掉的专家权重过大
             gate_out = gate_out.unsqueeze(1) 
