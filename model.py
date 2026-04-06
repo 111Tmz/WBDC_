@@ -86,9 +86,13 @@ class FM(nn.Module):
 # 四、DIN Attention
 # ==========================
 
+
+
 class Dice(nn.Module):
     def __init__(self, dim, eps=1e-8):
         super().__init__()
+        # BatchNorm1d 在 (B, C, L) 中，对每个通道 C，在 (B, L) 上计算均值和方差
+        # 它规定第1（下标）维就是通道维（dim）
         self.bn = nn.BatchNorm1d(dim, eps=eps)
         self.alpha = nn.Parameter(torch.zeros(dim))
 
@@ -109,25 +113,36 @@ class Attention(nn.Module):
     def __init__(self, dim):
         super().__init__()
         self.fc = nn.Sequential(
-            nn.Linear(dim*4, 128),
+            nn.Linear(dim*4, 128), # nn.Linear作用在最后一个维度上，输入是4*dim，输出是128
             Dice(128),   # ⭐ 改这里
             nn.Linear(128, 1)
         )
 
     def forward(self, query, keys, mask):
-        seq_len = keys.size(1)
-        query = query.unsqueeze(1).expand(-1, seq_len, -1)
+        '''
+        (query, keys, mask)的形状分别是(B, D)，(B, L, D)，(B, L)
+        query是候选商品的嵌入表示，keys是用户历史行为序列的嵌入表示，mask是历史行为序列的掩码
+        (B,D), (B,L,D), (B,L) -> (B,L)
+        '''
+        seq_len = keys.size(1) # keys的形状是(B, L, dim)，所以seq_len是L，即序列长度
+        query = query.unsqueeze(1).expand(-1, seq_len, -1) 
+        # query的形状是(B, D)，通过unsqueeze(1)变成(B, 1, D)，再通过expand(-1, seq_len, -1)变成(B, L, D)，与keys对齐
 
-        x = torch.cat([query, keys, query-keys, query*keys], dim=-1)
-        attn = self.fc(x).squeeze(-1)
+        x = torch.cat([query, keys, query-keys, query*keys], dim=-1) # shape (B, L, 4*dim)
+        attn = self.fc(x).squeeze(-1)# shape (B, L, 1) -> (B, L)
 
         # mask
         attn = attn.masked_fill(mask == 0, torch.finfo(attn.dtype).min)
+        # torch.finfo(attn.dtype).min 是 attn 数据类型的最小值，通常是一个非常大的负数，这样在 softmax 后对应位置的权重接近于0
+        # finfo 是一个函数，返回一个对象，这个对象包含了attn数据类型的各种信息，包括最小值、最大值、精度等。这里我们用它来获取attn数据类型的最小值，以便在mask中使用。
 
         # ❗ 仍然必须用 softmax
-        attn = torch.softmax(attn, dim=1)
+        attn = torch.softmax(attn, dim=1) # shape (B, L)，在序列长度维度上进行softmax，得到注意力权重
 
-        out = torch.sum(keys * attn.unsqueeze(-1), dim=1)
+        out = torch.sum(keys * attn.unsqueeze(-1), dim=1) 
+        # keys的形状是(B, L, dim)，attn.unsqueeze(-1)的形状是(B, L, 1)，
+        # 通过广播机制，keys * attn.unsqueeze(-1)的形状是(B, L, dim)，然后在序列长度维度上求和，得到(B, dim)
+
         return out
 
 
@@ -135,52 +150,72 @@ class Attention(nn.Module):
 class DIN(nn.Module):
     def __init__(self, dim):
         super().__init__()
-        self.attn = Attention(dim)
+        self.attn = Attention(dim) 
 
     def forward(self, hist_emb, target_emb, mask):
+        # hist_emb: (B, L, D)，用户历史行为序列的嵌入表示，形状是 (batch_size, seq_len, embed_dim)
+        # target_emb: (B, D)，候选商品的嵌入表示，形状是 (batch_size, embed_dim)
+        # mask: (B, L)，历史行为序列的掩码，形状是 (batch_size, seq_len)，其中1表示有效位置，0表示无效位置
         return self.attn(target_emb, hist_emb, mask)
+
 
 # ==========================
 # 五、MMOE（含Expert Dropout）
 # ==========================
+
+
 class MMOELayer(nn.Module):
-    def __init__(self, num_tasks, num_experts, input_dim, output_dim, dropout=0.2):
+    def __init__(self, num_experts, num_tasks, input_dim, output_dim, expert_units=32, gate_units=32, dropout=0.2):
         super().__init__()
         self.num_experts = num_experts
         self.num_tasks = num_tasks
         self.dropout = dropout
 
-        self.experts = nn.ModuleList([
-            nn.Linear(input_dim, output_dim, bias=False)
-            for _ in range(num_experts)
+        self.experts =  nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(input_dim,expert_units),
+                nn.ReLU(),
+                nn.Linear(expert_units,output_dim)
+            ) for _ in range(num_experts) 
         ])
 
         self.gates = nn.ModuleList([
-            nn.Linear(input_dim, num_experts, bias=False)
-            for _ in range(num_tasks)
+            nn.Sequential(
+                nn.Linear(input_dim,gate_units),
+                nn.ReLU(),
+                nn.Linear(gate_units,num_experts)
+            ) for _ in range(num_tasks) 
         ])
-
+        
+        
     def forward(self, x):
         expert_out = torch.stack([e(x) for e in self.experts], dim=2)
+        # expert_out的形状是(batch_size, output_dim, num_experts)，每个专家的输出在最后一个维度上
+        
+        mask = torch.ones(x.size(0), self.num_experts, device=x.device)
 
         if self.training:
             mask = (torch.rand(x.size(0), self.num_experts, device=x.device)
                     > self.dropout).float()
-
+            # mask的形状是(batch_size, num_experts)，每个专家对应一个0/1的掩码，表示是否被drop掉，
+            # 这样设计是因为要和gate_out的形状对齐，gate_out的形状是(batch_size, num_experts)
+        
         outputs = []
         for gate in self.gates:
             gate_out = torch.softmax(gate(x), dim=1)
-
-            if self.training:
-                gate_out = gate_out * mask
-                gate_out = gate_out / (gate_out.sum(dim=1, keepdim=True)+1e-8)
-
-            gate_out = gate_out.unsqueeze(1)
-            out = (expert_out * gate_out).sum(dim=2)
+            # gate_out的形状是(batch_size, num_experts)，表示每个专家的权重
+            gate_out *= mask
+            gate_out = gate_out / (gate_out.sum(dim=1, keepdim=True)+1e-8)
+            # 对gate_out进行归一化，确保权重和为1，避免drop掉的专家权重过大
+            gate_out = gate_out.unsqueeze(1) 
+            # gate_out的形状变为(batch_size, 1, num_experts)，方便和expert_out进行加权求和
+            out = (expert_out*gate_out).sum(dim=2)
+            # expert_out的形状是(batch_size, output_dim, num_experts)，
+            # gate_out的形状是(batch_size, 1, num_experts)，
+            # 通过广播机制，expert_out*gate_out的形状是(batch_size, output_dim, num_experts)，
+            # 然后在专家维度上求和，得到(batch_size, output_dim)，即每个任务
             outputs.append(out)
-
         return outputs
-
 
 # ==========================
 # 六、主模型
