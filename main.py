@@ -35,7 +35,7 @@ def uAUC(labels, preds, user_id_list):
             total_auc += roc_auc_score(user_truth[uid], user_pred[uid])
             size += 1
 
-    return total_auc / size if size > 0 else 0
+    return total_auc / size if size > 0 else 0.5
 
 
 def evaluate(val_labels, val_preds, userids, target):
