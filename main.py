@@ -12,6 +12,9 @@ from torch.amp import autocast, GradScaler
 
 from model import Model, MMOEDataset
 
+import torch.autograd
+torch.autograd.set_detect_anomaly(True)
+
 # ==========================
 # uAUC
 # ==========================
